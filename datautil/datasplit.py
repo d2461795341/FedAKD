@@ -4,6 +4,9 @@ import os
 import math
 import functools
 import torch.distributed as dist
+import matplotlib.pyplot as plt
+import matplotlib
+from matplotlib.ticker import MultipleLocator
 
 
 class Partition(object):
@@ -69,9 +72,12 @@ class DataPartitioner(object):
 
     def partition_indices(self, indices):
         indices = self._create_indices(indices)
+        #分布式？？？
         if self.consistent_indices:
             indices = self._get_consistent_indices(indices)
 
+        # it divides the dataset of client into train,val and test
+        # 用于分割train-test-valid
         if self.partition_type == 'evenly':
             classes = np.unique(self.data.targets)
             lp = len(self.partition_sizes)
@@ -79,8 +85,8 @@ class DataPartitioner(object):
             ttar = indices[:, 1]
             for i in range(lp):
                 self.partitions.append(np.array([]))
-            for c in classes:
-                tindice = np.where(ttar == c)[0]
+            for c in classes:   #let train, val and test data have the same data distribution
+                tindice = np.where(ttar == c)[0]    #这里的[0]为了让我们得到一个list而不是array
                 lti = len(tindice)
                 from_index = 0
                 for i in range(lp):
@@ -95,6 +101,7 @@ class DataPartitioner(object):
                     from_index = to_index
             for i in range(lp):
                 self.partitions[i] = self.partitions[i].astype(np.int).tolist()
+        #用于按照迪利克雷分布分割每个客户端的数据
         else:
             from_index = 0
             for partition_size in self.partition_sizes:
@@ -102,9 +109,45 @@ class DataPartitioner(object):
                 self.partitions.append(indices[from_index:to_index])
                 from_index = to_index
 
-        record_class_distribution(
+        targets_of_partitions=record_class_distribution(
             self.partitions, self.data.targets
         )
+        '''
+        fig, ax = plt.subplots()
+        plt.figure(1)
+
+       
+        #plt.xlim(1,len(targets_of_partitions)+1)
+        #plt.ylim(1,len(targets_of_partitions[0]))
+        
+
+        x_major_locator = MultipleLocator(1)  # 以每15显示
+        y_major_locator = MultipleLocator(1)  # 以每1显示
+        ax = plt.gca()
+        ax.xaxis.set_major_locator(x_major_locator)
+        ax.yaxis.set_major_locator(y_major_locator)
+
+        plt.ylabel('class',fontdict={'family' : 'Times New Roman', 'size'   : 30})
+        plt.xlabel('client',fontdict={'family' : 'Times New Roman', 'size'   : 30})
+
+        xx = np.arange(1, 21, 1)
+        print(xx)
+        x=['','','','','5','','','','','10','','','','','15','','','','','20']
+        plt.yticks(fontproperties='Times New Roman', size=28)
+        plt.xticks(xx,x,fontproperties='Times New Roman', size=28)
+        for idx in range(len(targets_of_partitions)):
+            sum=0
+            for i in range(len(targets_of_partitions[idx])):
+                sum+=targets_of_partitions[idx][i][1]
+            for j in range(len(targets_of_partitions[idx])):
+                plt.scatter(idx+1,targets_of_partitions[idx][j][0]+1, s=float(targets_of_partitions[idx][j][1])/sum*300, c='b', marker='o')
+        fig.savefig('pamap.eps', dpi=600, format='eps',bbox_inches = 'tight')
+        plt.show()
+        '''
+
+
+
+
 
     def _create_indices(self, indices):
         if self.partition_type == "origin":
@@ -113,6 +156,7 @@ class DataPartitioner(object):
             # it will randomly shuffle the indices.
             self.conf.random_state.shuffle(indices)
         elif self.partition_type == 'evenly':
+            # it will return the (idx, target) pairs
             indices = np.array([
                 (idx, target)
                 for idx, target in enumerate(self.data.targets)
@@ -265,9 +309,10 @@ def record_class_distribution(partitions, targets):
     return targets_of_partitions
 
 
+#train-test-valid比例
 def define_val_dataset(conf, train_dataset):
     partition_sizes = [
-        0.4, 0.3, 0.3
+        conf.train_data_ratio, (1-conf.train_data_ratio), 0.0
     ]
     data_partitioner = DataPartitioner(
         conf,
@@ -296,10 +341,10 @@ def getdataloader(conf, dataall, root_dir='./split/'):
     file = root_dir+conf.dataset+str(conf.datapercent)+'/partion_'+conf.partition_data + \
         '_'+str(conf.non_iid_alpha)+'_'+str(conf.n_clients)+'.npy'
     if not os.path.exists(file):
-        data_part = define_data_loader(conf, dataall)
+        data_part = define_data_loader(conf, dataall)   #class contains the list of index block
         tmparr = []
         for i in range(conf.n_clients):
-            tmppart = define_val_dataset(conf, data_part.use(i))
+            tmppart = define_val_dataset(conf, data_part.use(i))    #return the train,val and test of client i
             tmparr.append(tmppart.partitions[0])
             tmparr.append(tmppart.partitions[1])
             tmparr.append(tmppart.partitions[2])
@@ -307,8 +352,9 @@ def getdataloader(conf, dataall, root_dir='./split/'):
         np.save(file, tmparr)
     else:
         conf.partition_data = 'origin'
-        data_part = define_data_loader(conf, dataall)
+        data_part = define_data_loader(conf, dataall)   #错误的 仅仅为了返回一个类而已
     data_part.partitions = np.load(file, allow_pickle=True).tolist()
+    #list of the class DataPartitioner
     clienttrain_list = []
     clientvalid_list = []
     clienttest_list = []

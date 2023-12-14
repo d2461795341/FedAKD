@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import numpy as np
+from torch.autograd._functions import tensor
 
 from datautil.datasplit import define_pretrain_dataset
 from datautil.prepare_data import get_whole_dataset
@@ -31,6 +33,24 @@ def train(model, data_loader, optimizer, loss_fun, device):
 
 def test(model, data_loader, loss_fun, device):
     model.eval()
+    loss_all = 0
+    total = 0
+    correct = 0
+    with torch.no_grad():
+        for data, target in data_loader:
+            data = data.to(device).float()
+            target = target.to(device).long()
+            output = model(data)
+            loss = loss_fun(output, target)
+            loss_all += loss.item()
+            total += target.size(0)
+            pred = output.data.max(1)[1]
+            correct += pred.eq(target.view(-1)).sum().item()
+
+        return loss_all / len(data_loader), correct/total
+
+def myfedmodetest(model, data_loader, loss_fun, device):
+    model.train()
     loss_all = 0
     total = 0
     correct = 0
@@ -116,6 +136,116 @@ def trainwithteacher(model, data_loader, optimizer, loss_fun, device, tmodel, la
 
     return loss_all / len(data_loader), correct/total
 
+
+def trainwithstudents(tmodel, data_loader, optimizer, loss_fun, device, smodel, lam, args):
+    tmodel.train()
+    for i in range(len(smodel)):
+        smodel[i].eval()
+    loss_all = 0
+    total = 0
+    correct = 0
+    for data, target in data_loader:
+        optimizer.zero_grad()
+
+        data = data.to(device).float()
+        target = target.to(device).long()
+        output = tmodel(data)
+        f1 = tmodel.get_sel_fea(data, args.plan)
+        loss = (1-args.agg_lam)*loss_fun(output, target)
+        list=[]
+        for i in range(len(smodel)):
+            smodel[i].eval()
+            list.append(smodel[i].get_sel_fea(data, args.plan).detach()*lam[i])
+        f2=sum(list)
+        loss += (args.agg_lam*F.mse_loss(f1, f2))
+        loss_all += loss.item()
+        total += target.size(0)
+        pred = output.data.max(1)[1]
+        correct += pred.eq(target.view(-1)).sum().item()
+        loss.backward()
+        optimizer.step()
+    return loss_all / len(data_loader), correct/total
+
+
+def trainwithfinetune(model,data_loader,dist_loader,optimizer,loss_fun, device, tmodel,sim_list, args):
+    model.train()
+    loss_all = 0
+    total = 0
+    correct = 0
+
+    dataloader_iterator = iter(dist_loader)
+
+    for data,target in data_loader:
+        soft_data,soft_target = next(dataloader_iterator)
+        optimizer.zero_grad()
+
+        data = data.to(device).float()
+        target = target.to(device).long()
+
+        soft_data = soft_data.to(device).float()
+        soft_target = soft_target.to(device).long()
+
+        output = model(data)
+        f1 = model.get_sel_fea(soft_data, args.plan)
+        loss = (1-args.finetune_lam)*loss_fun(output, target)
+        list = []
+        for i in range(len(tmodel)):
+            tmodel[i].eval()
+            list.append(tmodel[i].get_sel_fea(soft_data, args.plan).detach()*sim_list[i])
+        f2=sum(list)
+        loss += (args.finetune_lam * F.mse_loss(f1, f2))
+        loss_all += loss.item()
+        total += target.size(0)
+        pred = output.data.max(1)[1]
+        correct += pred.eq(target.view(-1)).sum().item()
+        loss.backward()
+        optimizer.step()
+    return loss_all / len(data_loader), correct/total
+
+def fedprox_FedAKD_client_train(model,data_loader,dist_loader,optimizer,loss_fun, device, tmodel,glo_model,sim_list, args):
+    model.train()
+    loss_all = 0
+    total = 0
+    correct = 0
+
+    dataloader_iterator = iter(dist_loader)
+
+    for data,target in data_loader:
+        soft_data,soft_target = next(dataloader_iterator)
+        optimizer.zero_grad()
+
+        data = data.to(device).float()
+        target = target.to(device).long()
+
+        soft_data = soft_data.to(device).float()
+        soft_target = soft_target.to(device).long()
+
+        output = model(data)
+        f1 = model.get_sel_fea(soft_data, args.plan)
+        loss = (1-args.finetune_lam)*loss_fun(output, target)
+        list = []
+        for i in range(len(tmodel)):
+            tmodel[i].eval()
+            list.append(tmodel[i].get_sel_fea(soft_data, args.plan).detach()*sim_list[i])
+        f2=sum(list)
+        loss += (args.finetune_lam * F.mse_loss(f1, f2))
+
+        w_diff = torch.tensor(0., device=device)
+        for w, w_t in zip(glo_model.parameters(), model.parameters()):
+            w_diff += torch.pow(torch.norm(w - w_t), 2)
+
+        w_diff = torch.sqrt(w_diff)
+        loss += args.mu / 2. * w_diff
+
+
+        loss_all += loss.item()
+        total += target.size(0)
+        pred = output.data.max(1)[1]
+        correct += pred.eq(target.view(-1)).sum().item()
+
+        loss.backward()
+        optimizer.step()
+    return loss_all / len(data_loader), correct/total
 
 def pretrain_model(args, model, filename, device='cuda'):
     print('===training pretrained model===')

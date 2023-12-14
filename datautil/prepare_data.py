@@ -9,7 +9,6 @@ from PIL import ImageFile
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-
 def get_data(data_name):
     """Return the algorithm class with the given name."""
     datalist = {'officehome': 'img_union', 'pacs': 'img_union', 'vlcs': 'img_union', 'medmnist': 'medmnist',
@@ -85,11 +84,10 @@ class ImageDataset(mydataset):
 
 class MedMnistDataset(Dataset):
     def __init__(self, filename='', transform=None):
-        self.data = np.load(filename+'xdata.npy')
-        self.targets = np.load(filename+'ydata.npy')
+        self.data = np.load(filename + 'xdata.npy')
+        self.targets = np.load(filename + 'ydata.npy')
         self.targets = np.squeeze(self.targets)
         self.transform = transform
-
         self.data = torch.Tensor(self.data)
         self.data = torch.unsqueeze(self.data, dim=1)
 
@@ -109,7 +107,6 @@ class PamapDataset(Dataset):
         self.transform = transform
         self.data = torch.unsqueeze(torch.Tensor(self.data), dim=1)
         self.data = torch.einsum('bxyz->bzxy', self.data)
-
     def select_class(self):
         xiaochuclass = [0, 5, 12]
         index = []
@@ -150,6 +147,7 @@ class CovidDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.data[idx], self.targets[idx]
+
 
 
 def getfeadataloader(args):
@@ -268,6 +266,30 @@ def covid_w(args):
 def get_whole_dataset(data_name):
     datalist = {'officehome': 'img_union_w', 'pacs': 'img_union_w', 'vlcs': 'img_union_w', 'medmnist': 'medmnist_w',
                 'medmnistA': 'medmnist_w', 'medmnistC': 'medmnist_w', 'pamap': 'pamap_w', 'covid': 'covid_w'}
+    if datalist[data_name] not in globals():
+        raise NotImplementedError("Algorithm not found: {}".format(data_name))
+    return globals()[datalist[data_name]]
+
+def medmnist_soft(args):
+    data = MedMnistDataset(args.root_dir+args.dataset+'/'+'soft/')
+    args.num_classes = 11
+    return data
+
+
+def pamap_soft(args):
+    data = PamapDataset(args.root_dir+'pamap/soft/')
+    args.num_classes = 10
+    return data
+
+
+def covid_soft(args):
+    data = CovidDataset(args.root_dir+'covid19/soft/')
+    args.num_classes = 4
+    return data
+
+
+def get_soft_dataset(data_name):
+    datalist = {'medmnist': 'medmnist_soft','medmnistA': 'medmnist_soft', 'medmnistC': 'medmnist_soft', 'pamap': 'pamap_soft', 'covid': 'covid_soft'}
     if datalist[data_name] not in globals():
         raise NotImplementedError("Algorithm not found: {}".format(data_name))
     return globals()[datalist[data_name]]

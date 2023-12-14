@@ -16,7 +16,7 @@ def communication(args, server_model, models, client_weights):
                     server_model.state_dict()[key].data.copy_(temp)
                     for client_idx in range(client_num):
                         models[client_idx].state_dict()[key].data.copy_(server_model.state_dict()[key])
-        elif args.alg.lower()=='fedap':
+        elif args.alg.lower()=='fedap' or args.alg.lower()=='fedsoft':
             tmpmodels=[]
             for i in range(client_num):
                 tmpmodels.append(copy.deepcopy(models[i]).to(args.device))

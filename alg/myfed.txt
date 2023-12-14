@@ -1,0 +1,247 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import copy
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy.stats
+from sklearn.cluster import KMeans
+
+from util.modelsel import modelsel
+from util.traineval import trainwithteacher, trainwithstudents, test
+from datautil.prepare_data import get_soft_dataset
+from datautil.datasplit import  DataPartitioner
+
+class myfed(torch.nn.Module):
+    def __init__(self, args):
+        super(myfed, self).__init__()
+        self.server_model, self.client_model, self.client_weight = modelsel(
+            args, args.device)
+        self.optimizers = [optim.SGD(params=self.client_model[idx].parameters(
+        ), lr=args.lr) for idx in range(args.n_clients)]
+        self.loss_fun = nn.CrossEntropyLoss()
+        self.args = args
+
+    def pretrain_cluster(self, train_loaders):
+        #pretrain
+        client_num = self.args.n_clients
+        optimizers = [optim.SGD(params=self.client_model[idx].parameters(
+        ), lr=self.args.lr) for idx in range(client_num)]
+        for idx in range(client_num):
+            client_idx = idx
+            model, train_loader, optimizer, tmodel = self.client_model[client_idx], train_loaders[client_idx], optimizers[client_idx], None
+            for _ in range(30):
+                _, _ = trainwithteacher(
+                    model, train_loader, optimizer, self.loss_fun, self.args.device, tmodel, 1, self.args, False)
+        #k-means cluster
+        self.distribution_dist=self.get_client_distribution_dist()
+        cluster_class = self.args.cluster_class
+        down_data = []
+        for i in range(len(self.distribution_dist)):
+            down_data.append(self.distribution_dist[i])
+        down_data=np.array(down_data)
+        '''# 肘部法取k值
+        SSE = []
+        left = 2
+        right = 10
+        for k in range(left, right):
+            km = KMeans(n_clusters=k)
+            km.fit(down_data)
+            SSE.append(km.inertia_)
+
+        
+        xx = range(left, right)
+        plt.xlabel("k")
+        plt.ylabel("SSE")
+        plt.plot(xx, SSE, "o-")
+        plt.savefig("SSE.png")
+        plt.show()
+        '''
+        km = KMeans(n_clusters=cluster_class).fit(down_data)
+        center = km.cluster_centers_
+        index = km.labels_
+        index_dist = {i: [] for i in range(cluster_class)}
+        for i in range(len(index)):
+            index_dist[index[i]].append(i)
+        self.index_dist=index_dist
+
+        server_models=[]
+        template_model=self.server_model
+        for i in range(len(center)):
+            for key in template_model.state_dict().keys():
+                if 'num_batches_tracked' in key:
+                    pass
+                else:
+                    temp = torch.zeros_like(template_model.state_dict()[key])
+                    for client_idx in range(len(index_dist[i])):
+                        temp += 1/len(index_dist[i]) * self.client_model[index_dist[i][client_idx]].state_dict()[key]
+                    template_model.state_dict()[key].data.copy_(temp)
+            server_models.append(template_model)
+        self.server_models=server_models
+
+        if self.args.dataset in ['vlcs', 'pacs']:
+            self.thes = 0.4
+        elif 'medmnist' in self.args.dataset:
+            self.thes = 0.5
+        elif 'pamap' in self.args.dataset:
+            self.thes = 0.5
+        else:
+            self.thes = 0.5
+
+
+    def get_center_distribution_dist(self):
+        data = get_soft_dataset(self.args.dataset)(self.args)
+        data_partitioner = DataPartitioner(
+            self.args,
+            data,
+            [1],
+            partition_type="evenly",
+            # consistent_indices=False,
+        )
+        data_soft = torch.utils.data.DataLoader(
+            data_partitioner.use(0), batch_size=self.args.batch, shuffle=True)
+        distribution_dist = {i: np.array([]) for i in range(len(self.server_models))}
+        for i in range(len(self.server_models)):
+            temp_list = list(np.zeros(self.args.num_classes, dtype=float))
+            temp_model = copy.deepcopy(
+                self.server_models[i]).to(self.args.device)
+            temp_model.eval()
+            with torch.no_grad():
+                for data, target in data_soft:
+                    data = data.to(self.args.device).float()
+                    output = temp_model(data)
+                    pred = output.data.max(1)[1]
+                    for j in pred:
+                        temp_list[j] += 1
+            summ = sum(temp_list)
+            for k in range(len(temp_list)):
+                temp_list[k] = temp_list[k] / summ
+            distribution_dist[i] = temp_list
+        return distribution_dist
+
+
+    def get_client_distribution_dist(self):
+        data = get_soft_dataset(self.args.dataset)(self.args)
+        data_partitioner = DataPartitioner(
+            self.args,
+            data,
+            [1],
+            partition_type="evenly",
+            # consistent_indices=False,
+        )
+        data_soft = torch.utils.data.DataLoader(
+            data_partitioner.use(0), batch_size=self.args.batch, shuffle=True)
+        distribution_dist = {i: np.array([]) for i in range(self.args.n_clients)}
+        for i in range(self.args.n_clients):
+            temp_list = list(np.zeros(self.args.num_classes, dtype=float))
+            temp_model = copy.deepcopy(
+                self.client_model[i]).to(self.args.device)
+            temp_model.eval()
+            with torch.no_grad():
+                for data, target in data_soft:
+                    data = data.to(self.args.device).float()
+                    output = temp_model(data)
+                    pred = output.data.max(1)[1]
+                    for j in pred:
+                        temp_list[j] += 1
+            summ = sum(temp_list)
+            for k in range(len(temp_list)):
+                temp_list[k] = temp_list[k] / summ
+            distribution_dist[i] = temp_list
+        return distribution_dist
+
+
+    def update_weight(self):
+        weight_list=[]
+        for i in range(len(self.center)):
+            weight=[]
+            center=self.center[i]
+            for j in range(len(self.index_dist[i])):
+                client=self.distribution_dist[self.index_dist[i][j]]
+                dists = [k for k in range(len(center))]
+                tmp = scipy.stats.wasserstein_distance(dists, dists, center, client)
+                weight.append(tmp)
+            summ=sum(weight)
+            for k in range(len(weight)):
+                weight[k]=weight[k]/summ
+            weight_list.append(np.array(weight))
+        return weight_list
+
+
+    def client_train(self, dataloader,val_loader):
+        self.center = self.get_center_distribution_dist()
+        self.client_weight=self.update_weight()
+        for i in range(len(self.server_models)):
+            center=self.server_models[i]
+            for j in range(len(self.index_dist[i])):
+                cid=self.index_dist[i][j]
+                client=self.client_model[cid]
+
+                flag=False
+                with torch.no_grad():
+                    _, v1a = test(client, val_loader[cid], self.loss_fun, self.args.device)
+                if(v1a>self.args.threshold):
+                    flag=True
+
+                if(flag==True):
+                    with torch.no_grad():
+                        _, v1a = test(client, val_loader[cid], self.loss_fun, self.args.device)
+                        _, v2a = test(center, val_loader[cid], self.loss_fun, self.args.device)
+                    if v2a <= v1a and v2a < self.thes:
+                        lam = 0
+                    else:
+                        lam = self.args.lam*self.client_weight[i][j]
+                else:
+                    lam = self.args.lam * self.client_weight[i][j]
+
+                model, train_loader, optimizer, tmodel = client, dataloader[cid], self.optimizers[cid], center
+                for _ in range(self.args.wk_iters):
+                     trainwithteacher(model, train_loader, optimizer, self.loss_fun, self.args.device, tmodel, lam, self.args, flag)
+
+
+    def server_train(self):
+        server_models = []
+        template_model = self.server_model
+        for i in range(len(self.server_models)):
+            for key in template_model.state_dict().keys():
+                if 'num_batches_tracked' in key:
+                    pass
+                else:
+                    temp = torch.zeros_like(template_model.state_dict()[key])
+                    for client_idx in range(len(self.index_dist[i])):
+                        temp += 1 / len(self.index_dist[i]) * self.client_model[self.index_dist[i][client_idx]].state_dict()[key]
+                    template_model.state_dict()[key].data.copy_(temp)
+            server_models.append(template_model)
+        self.server_models = server_models
+
+        self.distribution_dist=self.get_client_distribution_dist()
+        self.center = self.get_center_distribution_dist()
+        self.client_weight=self.update_weight()
+        data = get_soft_dataset(self.args.dataset)(self.args)
+        data_partitioner = DataPartitioner(
+            self.args,
+            data,
+            [1],
+            partition_type="evenly",
+            # consistent_indices=False,
+        )
+        data_soft = torch.utils.data.DataLoader(
+            data_partitioner.use(0), batch_size=self.args.batch, shuffle=True)
+        for i in range(len(self.server_models)):
+            center=self.server_models[i]
+            clients=[]
+            for j in range(len(self.index_dist[i])):
+                cid=self.index_dist[i][j]
+                clients.append(self.client_model[cid])
+            tmodel, train_loader, optimizer, smodel = center, data_soft, optim.SGD(params=center.parameters(), lr=self.args.lr), clients
+            lam=[]
+            for j in range(len(self.client_weight[i])):
+                lam.append(self.client_weight[i][j]*self.args.lam)
+            for _ in range(self.args.wk_iters):
+                trainwithstudents(center, train_loader, optimizer, self.loss_fun, self.args.device, clients, lam, self.args)
+
+
+    def client_eval(self, c_idx, dataloader):
+        train_loss, train_acc = test(
+            self.client_model[c_idx], dataloader, self.loss_fun, self.args.device)
+        return train_loss, train_acc

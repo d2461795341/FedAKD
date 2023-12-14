@@ -36,7 +36,7 @@ class metafed(torch.nn.Module):
             client_idx = idx
             model, train_loader, optimizer, tmodel, val_loader = self.client_model[
                 client_idx], train_loaders[client_idx], optimizers[client_idx], None, val_loaders[idx]
-            for _ in range(30):
+            for _ in range(1):
                 _, _ = trainwithteacher(
                     model, train_loader, optimizer, self.loss_fun, self.args.device, tmodel, 1, self.args, False)
             _, val_acc = test(model, val_loader,

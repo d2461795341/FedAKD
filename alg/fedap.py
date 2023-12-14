@@ -19,14 +19,42 @@ class fedap(fedavg):
         self.pretrain_model = copy.deepcopy(
             self.server_model).to(self.args.device)
         if not os.path.exists(preckpt):
+            #pretrain:30% of data to train 1 epoch
             pretrain_model(self.args, self.pretrain_model,
                            preckpt, self.args.device)
         self.preckpt = preckpt
         self.client_weight = get_weight_preckpt(
-            self.args, self.pretrain_model, self.preckpt, train_loaders, self.client_weight)
+            self.args, self.pretrain_model, self.preckpt, train_loaders, self.client_weight,self.args.device)
+
+    def fedap_server_aggre_part1(self):
+        pass
+    def fedap_server_aggre_part2(self):
+        client_num = self.args.n_clients
+        models= self.client_model
+        client_weights = self.client_weight
+        server_model =self.server_model
+        tmpmodels = []
+        for i in range(client_num):
+            tmpmodels.append(copy.deepcopy(models[i]).to(self.args.device))
+        with torch.no_grad():
+            for cl in range(client_num):
+                for key in self.server_model.state_dict().keys():
+                    temp = torch.zeros_like(server_model.state_dict()[key], dtype=torch.float32)
+                    for client_idx in range(client_num):
+                        temp += client_weights[cl, client_idx] * tmpmodels[client_idx].state_dict()[key]
+                    server_model.state_dict()[key].data.copy_(temp)
+                    if 'bn' not in key:
+                        models[cl].state_dict()[key].data.copy_(server_model.state_dict()[key])
+
+        for cl in range(client_num):
+            for key in models[cl].state_dict().keys():
+                if 'bn' not in key:
+                        self.client_model[cl].state_dict()[key].data.copy_(models[cl].state_dict()[key])
 
 
 def get_form(model):
+    #the mean and var of batch normalization 是基于batch的，(m,f,p,q)，m为min-batch sizes，f为特征图个数，p、q分别为特征图的宽高
+    #则该batch normalization层的mean和var均为f个
     tmpm = []
     tmpv = []
     for name in model.state_dict().keys():
@@ -74,7 +102,7 @@ def get_weight_matrix1(args, bnmlist, bnvlist, client_weights):
     return weight_m
 
 
-def get_weight_preckpt(args, model, preckpt, trainloadrs, client_weights, device='cuda'):
+def get_weight_preckpt(args, model, preckpt, trainloadrs, client_weights, device='cpu'):
     model.load_state_dict(torch.load(preckpt)['state'])
     model.eval()
     bnmlist1, bnvlist1 = [], []
@@ -83,8 +111,8 @@ def get_weight_preckpt(args, model, preckpt, trainloadrs, client_weights, device
         with torch.no_grad():
             for data, _ in trainloadrs[i]:
                 data = data.to(device).float()
-                fea = model.getallfea(data)
-                nl = len(data)
+                fea = model.getallfea(data) #batch normalization前的x
+                nl = len(data)     #batch size
                 tm, tv = [], []
                 for item in fea:
                     if len(item.shape) == 4:
@@ -98,6 +126,7 @@ def get_weight_preckpt(args, model, preckpt, trainloadrs, client_weights, device
                         tv.append(
                             torch.var(item, dim=0).detach().to('cpu').numpy())
                 avgmeta.update(nl, tm, tv)
+        #bnmlist1和bnvlist1中的第i个元素为第i个client在每个batch normalization中的mean和var组成的list
         bnmlist1.append(avgmeta.getmean())
         bnvlist1.append(avgmeta.getvar())
     weight_m = get_weight_matrix1(args, bnmlist1, bnvlist1, client_weights)

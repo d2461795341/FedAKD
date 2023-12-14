@@ -4,6 +4,10 @@ from alg.fedbn import fedbn
 from alg.base import base
 from alg.fedap import fedap
 from alg.metafed import metafed
+from alg.fedsoft import fedsoft
+from alg.myfed import myfed
+from alg.myfedmode import myfedmode
+from alg.fedprox_FedAKD import fedprox_FedAKD
 
 ALGORITHMS = [
     'fedavg',
@@ -11,7 +15,11 @@ ALGORITHMS = [
     'fedbn',
     'base',
     'fedap',
-    'metafed'
+    'metafed',
+    'fedsoft',
+    'myfed'
+    'myfedmode'
+    'fedprox_FedAKD'
 ]
 
 
