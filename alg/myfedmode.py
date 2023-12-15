@@ -393,8 +393,8 @@ class myfedmode(torch.nn.Module):
 
             # 客户端中本地数据的batch数量要和参考数据batch数量一致
             data_soft = torch.utils.data.DataLoader(
-                data_partitioner.use(0), batch_size=int(len(data_partitioner.use(0)) / (
-                        len(dataloader[cid]) * self.args.batch)), shuffle=True)
+                data_partitioner.use(0), batch_size=int((len(data_partitioner.use(0)) / 
+                        len(dataloader[cid])) * self.args.batch), shuffle=True)
 
             if(self.args.mode=='server' or self.args.mode=='null'):
                 model, train_loader, optimizer = client, dataloader[cid], self.optimizers[cid]
